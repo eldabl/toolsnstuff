@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# By Daniel Blomqvist.
+#
+# Keep the # newest files with the same file name start (until separator).
+# Don't care about the files absolute age,
+# always keep # of each group of files with the same start of file name.
+
+# redirect stderr to /dev/null
+# exec 2>/dev/null
+
+
+
+# "Usage $0 [<separator, default: ->] [<count of files to keep, default: 10>] [test]"
+
+SEP="-"
+CNT=10
+EKO=""
+
+if [ "$1" ]; then
+  SEP=$1
+fi
+if [ "$2" ]; then
+  CNT=$2
+fi
+if [ "$3" ]; then
+  echo "ONLY TEST!"
+  EKO="echo"
+fi
+
+# For each unique start of file name
+# find  -maxdepth 1 -type f | cut -d"$SEP" -f1 | sort -u
+
+for filestart in $(find -maxdepth 1 -type f | cut -d"$SEP" -f1 | sort -u) ; do
+
+  # Delete or only print delete statements
+  # echo $filestart
+  deletefiles=$(ls ${filestart}* | sort | head -n -${CNT})
+  # echo $deletefiles
+  for file in $deletefiles
+  do
+      # echo $file
+      if [ -n "$file" ]; then
+        $EKO rm "$file"
+      fi
+  done
+
+done

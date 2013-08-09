@@ -1,0 +1,298 @@
+#!/bin/bash
+#
+# By Daniel Blomqvist
+#
+# Easy access to latest production backup, database and files, and
+# load of it.
+#
+# For this to work add your (virtualnodes) users pub-key in auhtorized keys
+# at user example's .ssh folder at server example.
+#
+# Put your site parameters in configuration file like this ...
+# arnold_config/[Site Id].config
+# ... in the same folder as this script.
+#
+# TODO: Make script database engine agnostic.
+#
+
+site_id=${1}
+# Check if we have required paramter.
+if [[ -z "${site_id}" ]]; then
+  echo "${MESSAGE_PREFIX}Missing Site Id! Exiting."
+  exit 1
+fi
+
+# Common Settings.
+MESSAGE_PREFIX="|site_latest|-> "
+
+# Configuration file path.
+config_folder="example_config"
+config_file="${config_folder}/${site_id}.config"
+
+# Check if configuration file exists.
+if [[ ! -f "${config_file}" ]]; then
+  echo "${MESSAGE_PREFIX}Missing configuration file (${config_file})! Exiting."
+  exit 1
+fi
+
+# Get configuration.
+files_rsync_parameters=""
+source ${config_file}
+
+# Read parameters.
+DO_FILES=""
+NO_DRUSH=""
+NO_DB=""
+KEEP_PROD_DB=""
+for arg in "$@"
+do
+    option=$(echo $arg | awk -F= '{print $1}')
+    value=$(echo $arg | awk -F= '{print $2}')
+
+    case $option in
+        '--files')
+            DO_FILES="1"
+        ;;
+        '--no-drush')
+            NO_DRUSH="1"
+        ;;
+        '--no-db')
+            NO_DB="1"
+        ;;
+        '--keep-prod-db')
+            KEEP_PROD_DB="1"
+        ;;
+    esac
+done
+
+
+# Production backup server
+production_backup_server="example"
+production_backup_dir="/srv/example"
+production_backup_database_name_prefix="${site_id}_db1"
+production_backup_database_path_prefix="${production_backup_dir}/${production_backup_database_name_prefix}"
+production_backup_files_folder_name="${site_id}_files"
+production_backup_files_path="${production_backup_dir}/${production_backup_files_folder_name}"
+
+# Site
+site_dir="/srv/www/${site_id}/web"
+folder_dir="${site_dir}/sites/default"
+
+function get_mysql_root_statement() {
+  
+  # Potenial passwords in local environment.
+  PASSWORDS=(
+  EMPTY
+  password
+  )
+
+  # Initiate variable.
+  MYSQL_ROOT_PASS_STATEMENT="0"
+
+  # Loop over each password and pick what works.
+  for pass in ${PASSWORDS[@]}; do
+  
+    if [ $pass == "EMPTY" ]
+    then
+      password_statement=""
+    else
+      password_statement="-p${pass}"
+    fi
+    
+    db_password_works=$(mysql -uroot ${password_statement}  -s -N -e "SELECT User FROM mysql.user WHERE Host='localhost' AND User = 'root'" 2>/dev/null)
+        
+    if [[ -n "${db_password_works}" ]]
+    then
+      MYSQL_ROOT_PASS_STATEMENT=${password_statement}
+      break
+    fi
+  done
+  
+  # No potential password worked -> ask user.
+  if [ "${MYSQL_ROOT_PASS_STATEMENT}" == "0" ]
+    then
+      echo "${MESSAGE_PREFIX}MySQL root password, please:"
+      read MYSQL_ROOT_PASS
+      if [[ -n "${MYSQL_ROOT_PASS}" ]]; then
+        MYSQL_ROOT_PASS_STATEMENT="-p${MYSQL_ROOT_PASS}"
+      fi
+  fi
+}
+
+function create_db() {
+  MYSQL_ROOT_PASS_STATEMENT=$1
+  db_name=$2
+  db_user=$3
+  db_pass=$4  
+  db_pass_statement=""
+  if [[ -n "${db_pass}" ]]; then
+    db_pass_statement="-p${db_pass}"
+  fi
+  mysql -uroot ${MYSQL_ROOT_PASS_STATEMENT} -e "CREATE DATABASE ${db_name};"
+  mysql -uroot ${MYSQL_ROOT_PASS_STATEMENT} -e "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, CREATE TEMPORARY TABLES, LOCK TABLES ON ${db_name}.* TO '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';"
+  echo "${MESSAGE_PREFIX}Database ${db_name} with database user ${db_user} is created."
+}
+
+function create_db_if_missing() {
+  MYSQL_ROOT_PASS_STATEMENT=$1
+  db_name=$2
+  db_user=$3
+  db_pass=$4  
+  db_pass_statement=""
+  if [[ -n "${db_pass}" ]]; then
+    db_pass_statement="-p${db_pass}"
+  fi
+  db_exists=$(mysql -uroot ${MYSQL_ROOT_PASS_STATEMENT} -s -N -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${db_name}'")
+
+  if [[ -z "${db_exists}" ]]; then
+    echo "${MESSAGE_PREFIX}The database ${db_name} is missing. Will try to create it."
+    create_db "${MYSQL_ROOT_PASS_STATEMENT}" "$db_name" "$db_user" "$db_pass"
+  fi
+}
+
+function backup_current_db() {
+  cd $site_dir
+  current_database_backup="/srv/www/${site_id}_$(date +%Y%m%dT%H%M).mysql"
+  drush --pipe sql-dump > ${current_database_backup}
+  echo "${MESSAGE_PREFIX}Current database saved as ${current_database_backup}."
+}
+
+function get_database(){
+  # Create settings.php if missing.
+  if [[ ! -f "${folder_dir}/settings.php" ]];
+  then
+    echo "${MESSAGE_PREFIX}The ${folder_dir}/settings.php file is missing. Will try to create one."
+    chmod u+w ${folder_dir}
+    fairly_random_password=$(date | md5sum | cut -d" " -f1 | cut -c 1-9)
+    get_mysql_root_statement
+    create_db_if_missing "${MYSQL_ROOT_PASS_STATEMENT}" "${site_id}_db1" "${site_id}_u1" "${fairly_random_password}"
+    if [[ "${db_exists}" ]]; then
+      echo "${MESSAGE_PREFIX}Database ${site_id}_db1 already exists. Database password, please:"
+      read EXISTING_DB_PASS
+      db_pass_used="${EXISTING_DB_PASS}"
+    else
+      db_pass_used="${fairly_random_password}"
+    fi
+    echo "${MESSAGE_PREFIX}Will create settings.php by installing a plain Drupal core site."
+    drush site-install --db-url=mysql://${site_id}_u1:${db_pass_used}@localhost/${site_id}_db1 -y
+  fi
+    
+  # Use existing settings.php to create database if missing.
+  folder_dir=$1
+  cd ${folder_dir}
+  db_connect=$(drush sql-connect)
+  db_name=$(echo ${db_connect} | awk -F' --database=' '{ print $2 }' | awk -F' ' '{print $1}')
+  db_user=$(echo ${db_connect} | awk -F' --user=' '{ print $2 }' | awk -F' ' '{print $1}')
+  db_pass=$(echo ${db_connect} | awk -F' --password=' '{ print $2 }' | awk -F' ' '{print $1}')
+  get_mysql_root_statement
+  create_db_if_missing "${MYSQL_ROOT_PASS_STATEMENT}" "$db_name" "$db_user" "$db_pass"
+  
+  # Backup current database.
+  backup_current_db
+
+  # Drop current database.
+  if [ $site_id == 222 ]
+    then 
+    echo "${MESSAGE_PREFIX}Oh my, it's this site, I'm gonna do something special for you!"
+    mysql -uroot -e 'drop database example1_db1'
+    mysql -uroot -e 'create database example1_db1'
+  else
+    echo ""
+  if ! [ $site_id == example1 ]
+    then drush sql-drop -y
+    echo "${MESSAGE_PREFIX}Dropped current database."
+  else
+    echo "${MESSAGE_PREFIX}Failed to drop current database."
+
+    fi
+  fi
+
+  # Get latest production database backup.
+  # TODO: Do not fetch database backup file if already present in Site Dir (because of for example --keep-prod-db).
+  if scp arnold@${production_backup_server}:${production_backup_database_path_prefix}* ${site_dir}
+  then
+    echo "${MESSAGE_PREFIX}Copy of production database backup file success."
+  else
+    echo "${MESSAGE_PREFIX}Failed to copy production database backup file (${production_backup_database_path_prefix})."
+  fi
+
+  # Load database.
+  cd ${site_dir}
+
+  latest_db_backup_file=$(ls -t | grep ${production_backup_database_name_prefix} | head -1)
+  echo "${MESSAGE_PREFIX}Unpacking: ${latest_db_backup_file}"
+  if gunzip --force ${latest_db_backup_file}
+  then
+    echo "${MESSAGE_PREFIX}Unpack of ${latest_db_backup_file} success."
+  else
+    echo "${MESSAGE_PREFIX}Failed to unpack ${latest_db_backup_file}."
+  fi
+
+  db_to_load=$(echo ${latest_db_backup_file} | sed -r 's/.gz//g')
+  echo "${MESSAGE_PREFIX}Loading: ${db_to_load}"
+  if drush sql-cli < ${site_dir}/${db_to_load}
+  then echo "${MESSAGE_PREFIX}Database ${db_to_load} successfully loaded."
+    if [ -z ${KEEP_PROD_DB} ] ; then
+      rm ${db_to_load}
+    fi
+  else
+    echo "${MESSAGE_PREFIX}Database ${db_to_load} failed to load."
+  fi
+  
+  # TODO: Possibility to remove all old database backups. Maybe save latest?
+}
+
+function get_files(){
+  # Get latest production files folder.
+	if rsync -rtvz arnold@${production_backup_server}:${production_backup_files_path}/* ${folder_dir}/files ${files_rsync_parameters}
+  then
+		echo "${MESSAGE_PREFIX}Synchronization of files success."
+  else
+		echo "${MESSAGE_PREFIX}Failed to synchronize files."
+	fi
+}
+
+function run_drush_commands(){
+  command_string=${1}
+  current_ifs="|"
+  sleep_time="1"
+
+  # Convert string $command_string of multiple drush commands into
+  # an array of drush commands. Works even if some drush commands
+  # contains space character(s).
+  IFS="$current_ifs" read -ra COMMANDS <<< "${command_string}"
+
+  # Run drush commands.
+  cd ${site_dir}
+  for (( epos=0; epos<${#COMMANDS[@]}; epos++ )); do
+   drush -y ${COMMANDS[$epos]}
+   sleep ${sleep_time}
+  done
+
+  echo "${MESSAGE_PREFIX}Drush commands are run."
+}
+
+
+# Main
+cd $site_dir
+
+if [ ${DO_FILES} ] ; then
+  echo "${MESSAGE_PREFIX}As you wish Master, files will be synchronized."
+  get_files
+fi
+
+if [ -z ${NO_DB} ] ; then
+  echo "${MESSAGE_PREFIX}Retrieval of database soon to be processed, Master."
+  get_database "${folder_dir}"
+fi
+
+if [ -z ${NO_DRUSH} ] ; then
+  echo "${MESSAGE_PREFIX}Your drush commands will soon be run, Master."
+  run_drush_commands "${drush_commands}"
+fi
+
+echo "${MESSAGE_PREFIX}My Master, everything is done."
+
+# Exit in success.
+exit 0
+

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Remove all files/folders except a number of the newest.
+#
+# By Daniel Blomqvist
+#
+#
+ROOT=$1
+COUNT_TO_SAVE=$2
+
+if [ -z "${ROOT}" ]; then
+  echo "Missing root folder. Abort."
+  echo "Usage $0 <root folder> [count of the newest files/folders to save in root folder, default: 20]"
+  exit 1
+fi
+
+if [ -z "${COUNT_TO_SAVE}" ]; then
+  COUNT_TO_SAVE=20
+fi
+
+cd ${ROOT}
+TARGETS=$(ls -tr | head -n -${COUNT_TO_SAVE})
+
+if [ -z "${TARGETS}" ]; then
+  echo "Nothing to remove."
+  exit 0
+fi
+
+# Give the user a chance to cancel.
+echo "This will happen:"
+echo ""
+for target in ${TARGETS} ; do
+  if [ -n "${target}" ]; then
+     echo " rm -rf ${target}"
+  fi
+done
+echo ""
+echo "All above will happen. Ok to proceed?"
+echo "Please answer Y/N"
+  while true; do
+      read yn
+      case $yn in
+          [Yy]* ) break;;
+          [Nn]* ) exit;;
+          * ) echo "Please answer y(es) or n(o).";;
+      esac
+  done
+
+# Remove each file/folder in root folder but save # of the newest.
+for target in ${TARGETS} ; do
+  if [ -n "${target}" ]; then
+      rm -rf "${target}"
+  fi
+done
